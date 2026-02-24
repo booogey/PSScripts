@@ -1,16 +1,31 @@
+[CmdletBinding(PositionalBinding=$false)]
 param(
-    [string]$location = "Jersey City",
-    [string]$path = "/Users/jamiell/Developer/Scripts/domains.txt",
-    [string]$errorlog = "/Users/jamiell/Developer/Scripts/errors_$location.csv",
+    [string[]]$locations = @(),
+    [string]$locationsPath = "/Users/jamiell/Developer/Scripts/locations.txt",
+    [string]$domainsPath = "/Users/jamiell/Developer/Scripts/domains.txt",
+    [string]$errorlog = "/Users/jamiell/Developer/Scripts/errors.csv",
     [boolean]$autoDisconnectEXO = $false,
     [boolean]$recycleMailboxes = $true
 )
 
+$totalfailures = 0;
+$totalSuccesses = 0;
 
-$successes = 0
-$failures = @()
+if(($null -ne $locationsPath) -and (Test-Path $locationsPath) -and ($locations.Count -le 0)) {
+    $locations = Get-Content -Path $locationsPath | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
+    if($locations.Count -le 0) {
+        Write-Host "No locations have been found in the file. Please check the file and try again." -ForegroundColor Yellow
+        exit
+    }
+}
 
-$domains = Get-Content -Path $path | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
+if(($null -ne $domainsPath) -and (Test-Path -Path $domainsPath)) {
+    $domains = Get-Content -Path $domainsPath | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
+    if($domains.Count -le 0) {
+        Write-Host "No domains have been found in the file. Please check the file and try again." -ForegroundColor Yellow
+        exit
+    }
+}
 
 if(Get-ConnectionInformation)
 {
@@ -22,32 +37,52 @@ else
     Connect-ExchangeOnline 
 }
 
-Write-Host "Fetching mailboxes for location: $location..." -ForegroundColor Cyan
-$mailboxes = Get-Mailbox -RecipientTypeDetails UserMailbox -ResultSize Unlimited | Select-Object -Property UserPrincipalName, Office | Where-Object { $_.Office -eq $location}
+Write-Host "Fetching user mailboxes..." -ForegroundColor Cyan
 
-if($mailboxes.Count -eq 0) {
-    Write-Host "No mailboxes found in $location."
+$mailboxes = Get-Mailbox -RecipientTypeDetails UserMailbox -ResultSize Unlimited | Select-Object -Property UserPrincipalName, Office
+
+if($mailboxes.Count -le 0) {
+    Write-Host "No mailboxes have been found. Please check your connection and try again." -ForegroundColor Yellow
     exit
 }
 
-$count = 0;
-foreach ($mailbox in $mailboxes) {
-    count++;
-    Write-Host "`rProcessing mailbox ($count / $($mailboxes.Count)) | Location: $location | Successful: $successes | Failed: $($failures.Count)" -NoNewline
-    try {
-        Set-MailboxJunkEmailConfiguration -Identity $mailbox.UserPrincipalName -TrustedSendersAndDomains @{Add=$domains} -ErrorAction Stop
-        $successes++
+foreach ($location in $locations) {
+    Write-Host "`nFetching mailboxes for location: $location..." -ForegroundColor Cyan
+    $filtered = @($mailboxes | Where-Object { $_.Office -eq $location})
 
+    if($filtered.Count -le 0) {
+        Write-Host "`nNo mailboxes found for location: $location" -ForegroundColor Yellow
+        continue
     }
-    catch {
-        #Write-Host "Failed to update mailbox: $($mailbox.UserPrincipalName). Error: $_" -ForegroundColor Red
-        $failures += @{
-            Mailbox = $mailbox.UserPrincipalName;
-            Location = $location;
-            Error = $_.Exception.Message
+
+    $count = 0;
+    $successes = 0
+    $failures = 0
+
+    foreach ($mailbox in $filtered) {
+        $count++
+        try {
+            Set-MailboxJunkEmailConfiguration -Identity $mailbox.UserPrincipalName -TrustedSendersAndDomains @{Add=$domains} -ErrorAction Stop
+            $successes++ 
+            $totalSuccesses++;
         }
+        catch {
+            #Write-Host "Failed to update mailbox: $($mailbox.UserPrincipalName). Error: $_" -ForegroundColor Red
+            $errors = @{
+                Mailbox = $mailbox.UserPrincipalName;
+                Location = $location;
+                Error = $_.Exception.Message
+            }
+
+            $failures++
+            $totalfailures++;
+
+            $errors | Export-Csv -Path $errorlog -Append -Force
+        }
+        Write-Host "`rProcessing mailbox ($count / $($filtered.Count)) | Location: $location | Successful: $successes | Failed: $failures" -NoNewline
     }
 }
+
 
 if($autoDisconnectEXO) 
 {
@@ -55,13 +90,4 @@ if($autoDisconnectEXO)
     Write-Host "`nDisconnected from Exchange Online." -ForegroundColor Green
 }
 
-if($failures.Count -le 0) 
-{
-    Write-Host "`nAll mailboxes updated successfully." -ForegroundColor Green
-}
-else 
-{
-    Write-Host "`nSome mailboxes failed to update. See failures at $errorlog." -ForegroundColor Red
-    $errorlog = $errorlog.Trim() -replace '[\[\]]', ''
-    $failures | Export-Csv -Path $errorlog -Force
-}
+Write-Host "`nScript execution completed. Check $errorlog for any errors." -ForegroundColor Green
